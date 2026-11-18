@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>HUDUD</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root { --mint:#d6f5e8; --ink:#16324a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; user-select:none; }
+  html,body { margin:0; height:100%; background:#0f2a3d; overflow:hidden; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; color:var(--ink); touch-action:none; }
+  #app { position:fixed; inset:0; display:flex; }
+  #stage { flex:1; position:relative; display:flex; align-items:center; justify-content:center; min-width:0; }
+  canvas { background:var(--mint); border-radius:10px; box-shadow:0 0 0 3px #0b1f2e, 0 8px 30px rgba(0,0,0,.4); }
+  #hud { position:absolute; top:8px; left:50%; transform:translateX(-50%); display:flex; gap:8px; z-index:3; }
+  .pill { background:rgba(255,255,255,.92); border-radius:999px; padding:5px 14px; font-weight:800; font-size:15px; box-shadow:0 2px 8px rgba(0,0,0,.25); }
+  #side { width:150px; padding:10px 8px; display:flex; flex-direction:column; gap:6px; }
+  #side h3 { margin:0 0 2px; color:#fff; font-size:13px; letter-spacing:1px; text-align:center; }
+  .row { display:flex; align-items:center; gap:6px; background:rgba(255,255,255,.93); border-radius:8px; padding:5px 7px; font-size:12px; font-weight:700; }
+  .row i { width:12px; height:12px; border-radius:50%; flex:none; }
+  .row span { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row.me { outline:2px solid #facc15; }
+  #info { color:#9fb8c8; font-size:11px; text-align:center; margin-top:auto; }
+  .overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:12px; background:rgba(10,30,45,.82); z-index:10; text-align:center; color:#fff; padding:16px; }
+  .overlay.hidden { display:none; }
+  .overlay h1 { margin:0; font-size:38px; letter-spacing:4px; }
+  .overlay small { color:#b7cddb; }
+  .overlay input { padding:11px 14px; border-radius:10px; border:0; font-size:17px; text-align:center; width:220px; }
+  .overlay button { padding:11px 30px; border-radius:10px; border:0; font-size:17px; font-weight:800; background:#22c55e; color:#fff; }
+  #banner { font-size:20px; font-weight:800; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <div id="hud"><div class="pill" id="pct">0%</div><div class="pill" id="timer">3:00</div></div>
+    <canvas id="cv"></canvas>
+    <div class="overlay" id="menu">
+      <h1>HUDUD</h1>
+      <small>BETA · o‘z hududingizni kengaytiring</small>
+      <input id="name" maxlength="14" placeholder="Ismingiz" autocomplete="off">
+      <button id="play">O‘YNASH</button>
+      <small>Boshqaruv: strelkalar / WASD yoki ekranda barmoq bilan suring</small>
+    </div>
+    <div class="overlay hidden" id="msg"><div id="banner"></div><small id="sub"></small></div>
+  </div>
+  <div id="side"><h3>TOP 5</h3><div id="top"></div><div id="info"></div></div>
+</div>
+<script>
+(() => {
+  const tg = window.Telegram && Telegram.WebApp;
+  if (tg) { try { tg.ready(); tg.expand(); tg.lockOrientation && tg.lockOrientation(); tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {} }
+
+  const $ = id => document.getElementById(id);
+  const cv = $('cv'), ctx = cv.getContext('2d');
+  let W = 90, H = 50, colors = [], cs = 10;
+  let ws, owner = new Uint8Array(W * H), S = null, myId = 0, joined = false, lastDir = [1, 0];
+
+  const patterns = {};
+  function mk(color, kind) {
+    const c = document.createElement('canvas'); c.width = c.height = 12;
+    const g = c.getContext('2d');
+    g.fillStyle = color; g.fillRect(0, 0, 12, 12);
+    g.fillStyle = 'rgba(255,255,255,.28)'; g.strokeStyle = 'rgba(255,255,255,.28)'; g.lineWidth = 1.5;
+    if (kind === 0) { g.beginPath(); g.arc(6, 6, 2, 0, 7); g.fill(); }
+    else if (kind === 1) { g.beginPath(); g.moveTo(0, 12); g.lineTo(12, 0); g.stroke(); }
+    else if (kind === 2) { g.beginPath(); g.moveTo(6, 2); g.lineTo(10, 6); g.lineTo(6, 10); g.lineTo(2, 6); g.closePath(); g.stroke(); }
+    else if (kind === 3) { g.fillRect(5, 1, 2, 10); g.fillRect(1, 5, 10, 2); }
+    else if (kind === 4) { g.beginPath(); g.arc(6, 6, 3.5, 0, 7); g.stroke(); }
+    return ctx.createPattern(c, 'repeat');
+  }
+  function pat(id) { return patterns[id] || (patterns[id] = mk(colors[id - 1], (id - 1) % 5)); }
+
+  function resize() {
+    const sw = $('stage').clientWidth - 16, sh = $('stage').clientHeight - 16;
+    cs = Math.max(4, Math.floor(Math.min(sw / W, sh / H)));
+    cv.width = W * cs; cv.height = H * cs;
+    draw();
+  }
+  addEventListener('resize', resize);
+
+  function connect() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    ws = new WebSocket(proto + '://' + location.host);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => { if (joined) send({ t: 'join', name: getName() }); };
+    ws.onmessage = e => {
+      if (typeof e.data !== 'string') { owner = new Uint8Array(e.data); draw(); return; }
+      const m = JSON.parse(e.data);
+      if (m.t === 'init') { W = m.W; H = m.H; colors = m.colors; owner = new Uint8Array(W * H); resize(); }
+      else if (m.t === 'you') { myId = m.id; lastDir = [0, 0]; $('msg').classList.add('hidden'); }
+      else if (m.t === 'dead') { myId = 0; showMsg('Yutqazdingiz 💥', 'Keyingi raund boshlanishini kuting yoki qayta o‘ynang', true); }
+      else if (m.t === 'full') showMsg('Xona to‘la', 'Maksimum 10 o‘yinchi. Birozdan keyin urinib ko‘ring', true);
+      else if (m.t === 's') { S = m; ui(); }
+    };
+    ws.onclose = () => setTimeout(connect, 1500);
+  }
+  const send = o => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+  const getName = () => ($('name').value.trim() || (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.first_name) || 'Player');
+
+  function showMsg(a, b, again) {
+    $('banner').textContent = a; $('sub').textContent = b;
+    $('msg').classList.remove('hidden');
+    if (again) { $('msg').onclick = () => { $('msg').classList.add('hidden'); send({ t: 'join', name: getName() }); }; }
+  }
+
+  let prevState = '';
+  function ui() {
+    const left = S.left, mm = Math.floor(left / 60), ss = String(left % 60).padStart(2, '0');
+    $('timer').textContent = mm + ':' + ss;
+    const me = S.players.find(p => p.id === myId);
+    $('pct').textContent = (me ? me.pct : 0).toFixed(1) + '%';
+    $('top').innerHTML = S.top.map(p =>
+      `<div class="row ${p.id === myId ? 'me' : ''}" style="margin-bottom:5px"><i style="background:${colors[p.id - 1]}"></i><span>${esc(p.name)}</span><b>${p.pct}%</b></div>`).join('');
+    $('info').textContent = S.online + ' ta o‘yinchi';
+    if (S.st === 'waiting' && joined) { if (myId) showMsg('Raqib kutilmoqda…', 'Kamida ' + S.need + ' ta o‘yinchi kerak', false); }
+    if (S.st === 'running' && prevState !== 'running') $('msg').classList.add('hidden');
+    if (S.st === 'over') {
+      const w = S.winner;
+      showMsg(w ? '🏆 G‘olib: ' + w.name : 'Durang', w ? w.pct + '% hudud egallandi' : '', false);
+    }
+    prevState = S.st;
+  }
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function draw() {
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    for (let i = 0; i < owner.length; i++) {
+      const id = owner[i]; if (!id) continue;
+      ctx.fillStyle = pat(id);
+      ctx.fillRect((i % W) * cs, ((i / W) | 0) * cs, cs, cs);
+    }
+    if (!S) return;
+    for (const p of S.players) {
+      const col = colors[p.id - 1];
+      ctx.fillStyle = col; ctx.globalAlpha = .55;
+      for (const i of p.trail) ctx.fillRect((i % W) * cs + 1, ((i / W) | 0) * cs + 1, cs - 2, cs - 2);
+      ctx.globalAlpha = 1;
+      const cx = p.x * cs + cs / 2, cy = p.y * cs + cs / 2;
+      ctx.beginPath(); ctx.arc(cx, cy, cs * .8, 0, 7);
+      ctx.fillStyle = col; ctx.fill();
+      ctx.lineWidth = p.id === myId ? 3 : 2; ctx.strokeStyle = p.id === myId ? '#fff' : '#16324a'; ctx.stroke();
+      ctx.fillStyle = '#16324a'; ctx.font = '700 ' + Math.max(9, cs * 1.1) + 'px system-ui'; ctx.textAlign = 'center';
+      ctx.fillText(p.name, cx, cy - cs * 1.2);
+    }
+  }
+
+  function dir(dx, dy) { if (dx === lastDir[0] && dy === lastDir[1]) return; lastDir = [dx, dy]; send({ t: 'dir', dx, dy }); }
+  addEventListener('keydown', e => {
+    const k = e.key.toLowerCase();
+    if (k === 'arrowup' || k === 'w') dir(0, -1);
+    else if (k === 'arrowdown' || k === 's') dir(0, 1);
+    else if (k === 'arrowleft' || k === 'a') dir(-1, 0);
+    else if (k === 'arrowright' || k === 'd') dir(1, 0);
+    else return;
+    e.preventDefault();
+  });
+  let tx = 0, ty = 0;
+  addEventListener('touchstart', e => { tx = e.touches[0].clientX; ty = e.touches[0].clientY; }, { passive: true });
+  addEventListener('touchmove', e => {
+    const dx = e.touches[0].clientX - tx, dy = e.touches[0].clientY - ty;
+    if (Math.abs(dx) < 18 && Math.abs(dy) < 18) return;
+    if (Math.abs(dx) > Math.abs(dy)) dir(dx > 0 ? 1 : -1, 0); else dir(0, dy > 0 ? 1 : -1);
+    tx = e.touches[0].clientX; ty = e.touches[0].clientY;
+  }, { passive: true });
+
+  $('play').onclick = () => {
+    joined = true; lastDir = [1, 0];
+    $('menu').classList.add('hidden');
+    send({ t: 'join', name: getName() });
+    showMsg('Tayyor bo‘ling…', 'Raund boshlanishini kuting', false);
+  };
+  const saved = (() => { try { return localStorage.getItem('hudud_name'); } catch (e) { return ''; } })();
+  if (saved) $('name').value = saved;
+  $('name').addEventListener('change', () => { try { localStorage.setItem('hudud_name', $('name').value); } catch (e) {} });
+
+  connect(); resize();
+})();
+</script>
+</body>
+  </html>
